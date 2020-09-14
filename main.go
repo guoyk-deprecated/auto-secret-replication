@@ -156,6 +156,8 @@ func routinePeriodical() conc.Task {
 	return conc.TaskFunc(func(ctx context.Context) (err error) {
 		tk := time.NewTicker(time.Minute * 15)
 		for {
+			log.Println("routine periodical fired")
+
 			// list all namespaces
 			var nss *corev1.NamespaceList
 			if nss, err = gClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{}); err != nil {
@@ -166,6 +168,8 @@ func routinePeriodical() conc.Task {
 			for _, ns := range nss.Items {
 				namespaces = append(namespaces, ns.Name)
 			}
+
+			log.Println("found namespaces:", strings.Join(namespaces, ","))
 
 			if err = replicateSecrets(ctx, namespaces); err != nil {
 				return

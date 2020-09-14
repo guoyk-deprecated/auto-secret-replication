@@ -42,7 +42,43 @@ subjects:
     name: auto-secret-replication
     namespace: autoops
 ---
-// TODO: statefulset of main
+apiVersion: v1
+kind: Service
+metadata:
+  name: auto-secret-replication
+  namespace: autoops
+spec:
+  ports:
+    - port: 42
+      name: life
+  clusterIP: None
+  selector:
+    app: auto-secret-replication
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: auto-secret-replication
+  namespace: autoops
+spec:
+  selector:
+    matchLabels:
+      app: auto-secret-replication
+  serviceName: auto-secret-replication
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: auto-secret-replication
+    spec:
+      serviceAccount: auto-secret-replication
+      containers:
+        - name: auto-secret-replication
+          image: guoyk/auto-secret-replication
+          imagePullPolicy: Always
+          env:
+            - name: SOURCE_NAMESPACE
+              value: autoops
 ```
 
 3. 在 `autoops` 命名空间部署需要复制的密文，并添加以下注解
