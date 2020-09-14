@@ -1,2 +1,56 @@
 # auto-secret-replication
+
 automatically replicate secrets to all namespaces, useful for tls certificates or docker registries
+
+自动从某个命名空间作为来源，复制指定密文到所有的命名空间
+
+## 使用方法
+
+1. 创建 `autoops` 命名空间
+
+2. 部署以下资源
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: auto-secret-replication
+  namespace: autoops
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  name: auto-secret-replication
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["list", "get", "watch", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: auto-secret-replication
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: auto-secret-replication
+subjects:
+  - kind: ServiceAccount
+    name: auto-secret-replication
+    namespace: autoops
+---
+// TODO: statefulset of main
+```
+
+3. 在 `autoops` 命名空间部署需要复制的密文，并添加以下注解
+
+```yaml
+net.guoyk.auto-secret-replication/enabled: "true"
+```
+
+## 许可证
+
+Guo Y.K., MIT License
