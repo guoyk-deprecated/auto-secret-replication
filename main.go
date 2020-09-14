@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"log"
@@ -152,26 +153,33 @@ func replicateSecrets(ctx context.Context, namespaces []string) (err error) {
 	return
 }
 
+func replicateSecretsToAll(ctx context.Context) (err error) {
+	// list all namespaces
+	var nss *corev1.NamespaceList
+	if nss, err = gClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{}); err != nil {
+		return
+	}
+
+	var namespaces []string
+	for _, ns := range nss.Items {
+		namespaces = append(namespaces, ns.Name)
+	}
+
+	log.Println("found namespaces:", strings.Join(namespaces, ","))
+
+	if err = replicateSecrets(ctx, namespaces); err != nil {
+		return
+	}
+	return
+}
+
 func routinePeriodical() conc.Task {
 	return conc.TaskFunc(func(ctx context.Context) (err error) {
 		tk := time.NewTicker(time.Minute * 15)
 		for {
 			log.Println("routine periodical fired")
 
-			// list all namespaces
-			var nss *corev1.NamespaceList
-			if nss, err = gClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{}); err != nil {
-				return
-			}
-
-			var namespaces []string
-			for _, ns := range nss.Items {
-				namespaces = append(namespaces, ns.Name)
-			}
-
-			log.Println("found namespaces:", strings.Join(namespaces, ","))
-
-			if err = replicateSecrets(ctx, namespaces); err != nil {
+			if err = replicateSecretsToAll(ctx); err != nil {
 				return
 			}
 
@@ -187,12 +195,56 @@ func routinePeriodical() conc.Task {
 
 func routineWatchNamespace() conc.Task {
 	return conc.TaskFunc(func(ctx context.Context) (err error) {
-		return
+		for {
+			var w watch.Interface
+			if w, err = gClient.CoreV1().Namespaces().Watch(ctx, metav1.ListOptions{}); err != nil {
+				return
+			}
+			for e := range w.ResultChan() {
+				if e.Type == watch.Added {
+					name := e.Object.(*corev1.Namespace).Name
+					log.Printf("add namespace event fired: %s", name)
+					if err = replicateSecrets(ctx, []string{name}); err != nil {
+						return
+					}
+				}
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			}
+		}
 	})
 }
 
 func routineWatchSecret() conc.Task {
 	return conc.TaskFunc(func(ctx context.Context) (err error) {
-		return
+		for {
+			var w watch.Interface
+			if w, err = gClient.CoreV1().Secrets(gSourceNamespace).Watch(ctx, metav1.ListOptions{}); err != nil {
+				return
+			}
+			for e := range w.ResultChan() {
+				if e.Type == watch.Added || e.Type == watch.Modified {
+					s := e.Object.(*corev1.Secret)
+					if s.Annotations == nil {
+						continue
+					}
+					if enabled, _ := strconv.ParseBool(s.Annotations[AnnotationKeyEnabled]); !enabled {
+						continue
+					}
+					log.Printf("add/update secret event fired: %s", s.Name)
+					if err = replicateSecretsToAll(ctx); err != nil {
+						return
+					}
+				}
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			}
+		}
 	})
 }
