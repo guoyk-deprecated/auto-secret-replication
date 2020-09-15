@@ -38,7 +38,19 @@ var (
 )
 
 func cloneSecret(s *corev1.Secret, ns string) *corev1.Secret {
-	rs := s.DeepCopy()
+	cs := s.DeepCopy()
+	rs := &corev1.Secret{
+		TypeMeta: cs.TypeMeta,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        cs.Name,
+			Namespace:   ns,
+			Annotations: cs.Annotations,
+			Labels:      cs.Labels,
+		},
+		Data: cs.Data,
+		Type: cs.Type,
+	}
+	// modify annotations
 	if rs.Annotations == nil {
 		rs.Annotations = map[string]string{
 			AnnotationKeyReplicated: "true",
@@ -47,7 +59,6 @@ func cloneSecret(s *corev1.Secret, ns string) *corev1.Secret {
 		delete(rs.Annotations, AnnotationKeyEnabled)
 		rs.Annotations[AnnotationKeyReplicated] = "true"
 	}
-	rs.Namespace = ns
 	return rs
 }
 
