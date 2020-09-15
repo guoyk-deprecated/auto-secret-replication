@@ -24,10 +24,10 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["list", "watch"]
+    verbs: ["watch"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["list", "get", "watch", "create", "update"]
+    verbs: ["get", "watch", "create", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: ClusterRoleBinding

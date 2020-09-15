@@ -17,7 +17,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 )
 
 const (
@@ -33,8 +32,140 @@ var (
 	gClient          *kubernetes.Clientset
 	gSourceNamespace = os.Getenv(EnvKeySourceNamespace)
 
-	gLocker = &sync.Mutex{}
+	gLocker          = &sync.Mutex{}
+	gKnownNamespaces = map[string]bool{}
+	gKnownSecrets    = map[string]*corev1.Secret{}
 )
+
+func cloneSecret(s *corev1.Secret, ns string) *corev1.Secret {
+	rs := s.DeepCopy()
+	if rs.Annotations == nil {
+		rs.Annotations = map[string]string{
+			AnnotationKeyReplicated: "true",
+		}
+	} else {
+		delete(rs.Annotations, AnnotationKeyEnabled)
+		rs.Annotations[AnnotationKeyReplicated] = "true"
+	}
+	rs.Namespace = ns
+	return rs
+}
+
+func addSecretTo(ctx context.Context, s *corev1.Secret, ns string) {
+	log.Printf("---------- ADD %s TO %s", s.Name, ns)
+	rs := cloneSecret(s, ns)
+	if es, err := gClient.CoreV1().Secrets(ns).Get(ctx, rs.Name, metav1.GetOptions{}); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			log.Printf("failed to check if secret %s existed in %s: %s", rs.Name, ns, err.Error())
+			return
+		}
+		if _, err = gClient.CoreV1().Secrets(ns).Create(ctx, rs, metav1.CreateOptions{}); err != nil {
+			log.Printf("failed to replicate %s in %s: %s", rs.Name, ns, err.Error())
+		} else {
+			log.Printf("replicated %s in %s", rs.Name, ns)
+		}
+	} else {
+		if !isReplicatedSecret(es) {
+			log.Printf("secret %s existed in %s and is not a replicated secret", rs.Name, ns)
+			return
+		}
+		if _, err = gClient.CoreV1().Secrets(ns).Update(ctx, rs, metav1.UpdateOptions{}); err != nil {
+			log.Printf("failed to update %s in %s: %s", rs.Name, ns, err.Error())
+		} else {
+			log.Printf("updated %s in %s", rs.Name, ns)
+		}
+	}
+}
+
+func removeSecretFrom(ctx context.Context, s *corev1.Secret, ns string) {
+	log.Printf("---------- REMOVE %s FROM %s", s.Name, ns)
+	if es, err := gClient.CoreV1().Secrets(ns).Get(ctx, s.Name, metav1.GetOptions{}); err != nil {
+		if k8serrors.IsNotFound(err) {
+			log.Printf("secret %s not existed in %s: %s", s.Name, ns, err.Error())
+		} else {
+			log.Printf("failed to check if secret %s existed in %s: %s", s.Name, ns, err.Error())
+		}
+	} else {
+		if !isReplicatedSecret(es) {
+			log.Printf("secret %s existed in %s and is not a replicated secret", s.Name, ns)
+			return
+		}
+		if err := gClient.CoreV1().Secrets(ns).Delete(ctx, s.Name, metav1.DeleteOptions{}); err != nil {
+			log.Printf("failed to remove %s in %s: %s", s.Name, ns, err.Error())
+		} else {
+			log.Printf("removed %s in %s", s.Name, ns)
+		}
+	}
+}
+
+func addSecret(ctx context.Context, s *corev1.Secret) {
+	gLocker.Lock()
+	defer gLocker.Unlock()
+	gKnownSecrets[s.Name] = s
+
+	for ns := range gKnownNamespaces {
+		addSecretTo(ctx, s, ns)
+	}
+}
+
+func removeSecret(ctx context.Context, s *corev1.Secret) {
+	gLocker.Lock()
+	defer gLocker.Unlock()
+	_, found := gKnownNamespaces[s.Name]
+	if !found {
+		return
+	}
+	delete(gKnownSecrets, s.Name)
+
+	for ns := range gKnownNamespaces {
+		removeSecretFrom(ctx, s, ns)
+	}
+}
+
+func addNamespace(ctx context.Context, ns string) {
+	gLocker.Lock()
+	defer gLocker.Unlock()
+	gKnownNamespaces[ns] = true
+
+	for _, s := range gKnownSecrets {
+		addSecretTo(ctx, s, ns)
+	}
+}
+
+func removeNamespace(ns string) {
+	gLocker.Lock()
+	defer gLocker.Unlock()
+	delete(gKnownNamespaces, ns)
+}
+
+func shouldReplicateNamespace(s *corev1.Namespace) bool {
+	if s.Name == gSourceNamespace {
+		return false
+	}
+	return true
+}
+
+func shouldReplicateSecret(s *corev1.Secret) bool {
+	if s == nil {
+		return false
+	}
+	if s.Annotations == nil {
+		return false
+	}
+	ok, _ := strconv.ParseBool(s.Annotations[AnnotationKeyEnabled])
+	return ok
+}
+
+func isReplicatedSecret(s *corev1.Secret) bool {
+	if s == nil {
+		return false
+	}
+	if s.Annotations == nil {
+		return false
+	}
+	ok, _ := strconv.ParseBool(s.Annotations[AnnotationKeyReplicated])
+	return ok
+}
 
 func exit(err *error) {
 	if *err != nil {
@@ -75,7 +206,6 @@ func main() {
 
 	go func() {
 		errChan <- conc.Parallel(
-			routinePeriodical(),
 			routineWatchNamespace(),
 			routineWatchSecret(),
 		).Do(ctx)
@@ -92,107 +222,6 @@ func main() {
 
 }
 
-func replicateSecrets(ctx context.Context, namespaces []string) (err error) {
-	gLocker.Lock()
-	defer gLocker.Unlock()
-
-	var sList *corev1.SecretList
-	if sList, err = gClient.CoreV1().Secrets(gSourceNamespace).List(ctx, metav1.ListOptions{}); err != nil {
-		return
-	}
-	for _, s := range sList.Items {
-		if s.Annotations == nil {
-			continue
-		}
-		if enabled, _ := strconv.ParseBool(s.Annotations[AnnotationKeyEnabled]); !enabled {
-			continue
-		}
-		log.Printf("secret: %s/%s ready to replicate", gSourceNamespace, s.Name)
-		for _, namespace := range namespaces {
-			// skip source namespace
-			if namespace == gSourceNamespace {
-				continue
-			}
-			// create replicated secret
-			rs := s.DeepCopy()
-			delete(rs.Annotations, AnnotationKeyEnabled)
-			rs.Annotations[AnnotationKeyReplicated] = "true"
-			rs.Namespace = namespace
-			// create or update
-			var existed *corev1.Secret
-			if existed, err = gClient.CoreV1().Secrets(namespace).Get(ctx, s.Name, metav1.GetOptions{}); err != nil {
-				if !k8serrors.IsNotFound(err) {
-					return
-				}
-				log.Printf("secret: %s/%s not found, will create", namespace, s.Name)
-				if _, err = gClient.CoreV1().Secrets(namespace).Create(ctx, rs, metav1.CreateOptions{}); err != nil {
-					log.Printf("failed to create %s/%s: %s", namespace, rs.Name, err.Error())
-					err = nil
-					continue
-				}
-				log.Printf("secret: %s/%s created", namespace, s.Name)
-			} else {
-				if existed.Annotations == nil {
-					log.Printf("missing annotations on existed replicated secrets: %s/%s", namespace, rs.Name)
-					continue
-				}
-				if replicated, _ := strconv.ParseBool(existed.Annotations[AnnotationKeyReplicated]); !replicated {
-					log.Printf("missing annotation on existed replicated secrets: %s/%s", namespace, rs.Name)
-					continue
-				}
-				log.Printf("secret: %s/%s already exists, will update", namespace, s.Name)
-				if _, err = gClient.CoreV1().Secrets(namespace).Update(ctx, rs, metav1.UpdateOptions{}); err != nil {
-					log.Printf("failed to update %s/%s: %s", namespace, rs.Name, err.Error())
-					err = nil
-					continue
-				}
-				log.Printf("secret: %s/%s updated", namespace, s.Name)
-			}
-		}
-	}
-	return
-}
-
-func replicateSecretsToAll(ctx context.Context) (err error) {
-	// list all namespaces
-	var nss *corev1.NamespaceList
-	if nss, err = gClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{}); err != nil {
-		return
-	}
-
-	var namespaces []string
-	for _, ns := range nss.Items {
-		namespaces = append(namespaces, ns.Name)
-	}
-
-	log.Println("found namespaces:", strings.Join(namespaces, ","))
-
-	if err = replicateSecrets(ctx, namespaces); err != nil {
-		return
-	}
-	return
-}
-
-func routinePeriodical() conc.Task {
-	return conc.TaskFunc(func(ctx context.Context) (err error) {
-		tk := time.NewTicker(time.Minute * 15)
-		for {
-			log.Println("routine periodical fired")
-
-			if err = replicateSecretsToAll(ctx); err != nil {
-				return
-			}
-
-			// wait done or ticker
-			select {
-			case <-ctx.Done():
-				return
-			case <-tk.C:
-			}
-		}
-	})
-}
-
 func routineWatchNamespace() conc.Task {
 	return conc.TaskFunc(func(ctx context.Context) (err error) {
 		for {
@@ -201,12 +230,21 @@ func routineWatchNamespace() conc.Task {
 				return
 			}
 			for e := range w.ResultChan() {
-				if e.Type == watch.Added {
-					name := e.Object.(*corev1.Namespace).Name
-					log.Printf("add namespace event fired: %s", name)
-					if err = replicateSecrets(ctx, []string{name}); err != nil {
-						return
+				switch e.Type {
+				case watch.Added:
+					n := e.Object.(*corev1.Namespace)
+					if shouldReplicateNamespace(n) {
+						log.Printf("++++++++++ NAMESPACE %s ADDED", n.Name)
+						addNamespace(ctx, n.Name)
+					} else {
+						log.Printf("++++++++++ NAMESPACE %s REMOVED", n.Name)
+						removeNamespace(n.Name)
 					}
+
+				case watch.Deleted:
+					n := e.Object.(*corev1.Namespace)
+					log.Printf("++++++++++ NAMESPACE %s REMOVED", n.Name)
+					removeNamespace(n.Name)
 				}
 			}
 
@@ -226,17 +264,21 @@ func routineWatchSecret() conc.Task {
 				return
 			}
 			for e := range w.ResultChan() {
-				if e.Type == watch.Added || e.Type == watch.Modified {
+				switch e.Type {
+				case watch.Added, watch.Modified:
 					s := e.Object.(*corev1.Secret)
-					if s.Annotations == nil {
-						continue
+					if shouldReplicateSecret(s) {
+						log.Printf("++++++++++ SECRET %s ADDED", s.Name)
+						addSecret(ctx, s)
+					} else {
+						log.Printf("++++++++++ SECRET %s REMOVED", s.Name)
+						removeSecret(ctx, s)
 					}
-					if enabled, _ := strconv.ParseBool(s.Annotations[AnnotationKeyEnabled]); !enabled {
-						continue
-					}
-					log.Printf("add/update secret event fired: %s", s.Name)
-					if err = replicateSecretsToAll(ctx); err != nil {
-						return
+				case watch.Deleted:
+					s := e.Object.(*corev1.Secret)
+					if shouldReplicateSecret(s) {
+						log.Printf("++++++++++ SECRET %s REMOVED", s.Name)
+						removeSecret(ctx, s)
 					}
 				}
 			}
