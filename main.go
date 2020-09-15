@@ -122,7 +122,7 @@ func addSecret(ctx context.Context, s *corev1.Secret) {
 func removeSecret(ctx context.Context, s *corev1.Secret) {
 	gLocker.Lock()
 	defer gLocker.Unlock()
-	_, found := gKnownNamespaces[s.Name]
+	_, found := gKnownSecrets[s.Name]
 	if !found {
 		return
 	}
