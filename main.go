@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const (
@@ -256,10 +257,15 @@ func routineWatchNamespace() conc.Task {
 					n := e.Object.(*corev1.Namespace)
 					log.Printf("++++++++++ NAMESPACE %s REMOVED", n.Name)
 					removeNamespace(n.Name)
+
+				case watch.Error:
+					log.Printf("error occured while watching secrets: %v", e.Object)
 				}
 			}
 
 			select {
+			case <-time.After(time.Second * 10):
+				log.Println("restart watching namespaces in 10 seconds")
 			case <-ctx.Done():
 				return
 			}
@@ -291,10 +297,14 @@ func routineWatchSecret() conc.Task {
 						log.Printf("++++++++++ SECRET %s REMOVED", s.Name)
 						removeSecret(ctx, s)
 					}
+				case watch.Error:
+					log.Printf("error occured while watching secrets: %v", e.Object)
 				}
 			}
 
 			select {
+			case <-time.After(time.Second * 10):
+				log.Println("restart watching secrets in 10 seconds")
 			case <-ctx.Done():
 				return
 			}
