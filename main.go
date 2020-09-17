@@ -23,6 +23,7 @@ import (
 const (
 	EnvKeySourceNamespace   = "SOURCE_NAMESPACE"
 	AnnotationKeyEnabled    = "net.guoyk.auto-secret-replication/enabled"
+	AnnotationKeyOverwrite  = "net.guoyk.auto-secret-replication/overwrite"
 	AnnotationKeyReplicated = "net.guoyk.auto-secret-replication/replicated"
 )
 
@@ -58,6 +59,7 @@ func cloneSecret(s *corev1.Secret, ns string) *corev1.Secret {
 		}
 	} else {
 		delete(rs.Annotations, AnnotationKeyEnabled)
+		delete(rs.Annotations, AnnotationKeyOverwrite)
 		rs.Annotations[AnnotationKeyReplicated] = "true"
 	}
 	return rs
@@ -77,7 +79,7 @@ func addSecretTo(ctx context.Context, s *corev1.Secret, ns string) {
 			log.Printf("replicated %s in %s", rs.Name, ns)
 		}
 	} else {
-		if !isReplicatedSecret(es) {
+		if !shouldOverwriteSecret(es, s) {
 			log.Printf("secret %s existed in %s and is not a replicated secret", rs.Name, ns)
 			return
 		}
@@ -98,7 +100,7 @@ func removeSecretFrom(ctx context.Context, s *corev1.Secret, ns string) {
 			log.Printf("failed to check if secret %s existed in %s: %s", s.Name, ns, err.Error())
 		}
 	} else {
-		if !isReplicatedSecret(es) {
+		if !shouldOverwriteSecret(es, s) {
 			log.Printf("secret %s existed in %s and is not a replicated secret", s.Name, ns)
 			return
 		}
@@ -168,7 +170,12 @@ func shouldReplicateSecret(s *corev1.Secret) bool {
 	return ok
 }
 
-func isReplicatedSecret(s *corev1.Secret) bool {
+func shouldOverwriteSecret(s *corev1.Secret, src *corev1.Secret) bool {
+	if src.Annotations != nil {
+		if ok, _ := strconv.ParseBool(src.Annotations[AnnotationKeyOverwrite]); ok {
+			return true
+		}
+	}
 	if s == nil {
 		return false
 	}
