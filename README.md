@@ -87,6 +87,12 @@ spec:
 net.guoyk.auto-secret-replication/enabled: "true"
 ```
 
+如果允许覆盖已经存在的密文，追加以下注解
+
+```yaml
+net.guoyk.auto-secret-replication/overwrite: "true"
+```
+
 ## 许可证
 
 Guo Y.K., MIT License
